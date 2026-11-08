@@ -24,6 +24,8 @@ jobs:
           node --check src/creds.mjs
           node --check src/backend.mjs
           node --check src/gateway.mjs
+          node --check src/version.mjs
+          node --check test/version.test.mjs
           node --check test/proto.test.mjs
           node --check test/policy.test.mjs
           node --check test/redact.test.mjs

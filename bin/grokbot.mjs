@@ -30,6 +30,7 @@ import {
   updateAgent,
 } from "../src/gateway.mjs";
 import { rememberScoped, scrubText } from "../src/redact.mjs";
+import { clientVersion } from "../src/version.mjs";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const MACOS_ONLY = "grokbot requires macOS; credential support is not available on this platform.";
@@ -54,7 +55,8 @@ Instructions are sent as the agent description through createAgent / updateAgent
 An instructions file must be at most 64 KiB.
 
 Credentials are read from the macOS keychain at run time and kept in memory only.
-The tool sends the app's client-type and version headers because the backend needs them.
+The tool sends the app's client-type header and the installed app's version because the backend rejects unknown versions.
+When no app version is found, the version falls back to 0.20.0. GROKBOT_CLIENT_VERSION overrides it.
 It sends no source field and no ghost-mode or client-source header.
 
 Exit codes: 0 success, 1 the message was not sent, 3 the message was sent and must not be resent, 4 delivery is unknown and the message must not be resent.
@@ -192,14 +194,36 @@ async function openSession(deps) {
   assertVisibleHeader(creds.accessToken, "access token");
   rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, creds.accessToken, true);
   rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, creds.teamId, false);
+  const version = sessionVersion(deps, platform);
   const route = await ensureSandbox(creds.accessToken, {
     teamId: creds.teamId,
     env,
     fetchImpl: deps.fetchImpl,
     secrets: deps.stderrSecrets,
     stdoutSecrets: deps.stdoutSecrets,
+    version,
   });
-  return { creds, route, env, fetchImpl: deps.fetchImpl, budget: createReadBudget(), secrets: deps.stderrSecrets };
+  return {
+    creds,
+    route,
+    env,
+    fetchImpl: deps.fetchImpl,
+    budget: createReadBudget(),
+    secrets: deps.stderrSecrets,
+    version,
+  };
+}
+
+function sessionVersion(deps, platform) {
+  if (deps.clientVersion) return deps.clientVersion;
+  return clientVersion({
+    home: deps.home ?? homedir(),
+    platform,
+    env: deps.env ?? process.env,
+    exists: deps.exists,
+    readFile: deps.readFile,
+    readPlist: deps.readPlist,
+  });
 }
 
 function callCtx(session) {
@@ -289,7 +313,13 @@ async function cmdSend(positionals, flags, deps, stdout) {
     sentAtMs: Date.now(),
     machineId: getMachineId(),
     language: "en",
-  }, { teamId: session.creds.teamId, env: session.env, fetchImpl: session.fetchImpl, secrets: session.secrets });
+  }, {
+    teamId: session.creds.teamId,
+    env: session.env,
+    fetchImpl: session.fetchImpl,
+    secrets: session.secrets,
+    version: session.version,
+  });
   const result = sent.result;
   if (result.outcome === "duplicate") {
     stdout("duplicate, already accepted\n");
@@ -368,6 +398,8 @@ async function cmdDoctor(deps, stdout) {
   const platform = deps.platform ?? process.platform;
   const home = deps.home ?? homedir();
   const env = credentialEnv(deps);
+  const version = sessionVersion(deps, platform);
+  stdout("client version: " + version + "\n");
   let failed = false;
   const mark = (name, ok, reason) => {
     if (ok) {
@@ -413,10 +445,15 @@ async function cmdDoctor(deps, stdout) {
         fetchImpl: deps.fetchImpl,
         secrets: deps.stderrSecrets,
         stdoutSecrets: deps.stdoutSecrets,
+        version,
       });
       mark("EnsureSandBox", true);
     } catch (error) {
-      mark("EnsureSandBox", false, error instanceof Error ? error.message : "failed");
+      const message = error instanceof Error ? error.message : "failed";
+      mark("EnsureSandBox", false, message);
+      if (/no longer supported/i.test(message)) {
+        stdout("hint: EnsureSandBox rejected client version " + version + ". Update Grok Bot, or set GROKBOT_CLIENT_VERSION to the installed app version.\n");
+      }
     }
   } else mark("EnsureSandBox", false, "no token");
   return failed ? 1 : 0;

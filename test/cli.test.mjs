@@ -336,10 +336,59 @@ test("create and update with --yes use the gateway shapes", async () => {
   });
 });
 
+test("backend requests send the version read from the app status file", async () => {
+  await withApp(async ({ deps, requests }) => {
+    const status = join(deps.home, "Library", "Application Support", "Grok Bot", "desktop-status.json");
+    const files = new Map([[status, JSON.stringify({ appVersion: "4.5.6" })]]);
+    let plistReads = 0;
+    deps.exists = (path) => files.has(path);
+    deps.readFile = (path) => files.get(path);
+    deps.readPlist = () => {
+      plistReads += 1;
+      throw new Error("plist");
+    };
+    assert.equal(await main(["bots"], deps), 0);
+    const sandbox = requests.find((record) => record.url.includes("EnsureSandBox"));
+    assert.equal(sandbox.headers["x-cursor-client-version"], "4.5.6");
+    assert.equal(plistReads, 0);
+    return 0;
+  });
+});
+
+test("doctor prints the client version and a hint when the version is rejected", async () => {
+  const home = mkdtempSync(join(tmpdir(), "grokbot-version-"));
+  const out = [];
+  try {
+    writeAccount(home, { password, token });
+    const code = await main(["doctor"], {
+      platform: "darwin",
+      home,
+      clientVersion: "0.9.0",
+      env: { GROKBOT_TEST_BASE_URL: "http://127.0.0.1:9" },
+      getKeychainPassword: () => password,
+      fetchImpl: async () => new Response("This version of Grok Bot is no longer supported", {
+        status: 401,
+        headers: { "content-type": "text/plain" },
+      }),
+      stdout: (chunk) => out.push(chunk),
+      stderr: () => {},
+    });
+    const text = out.join("");
+    assert.equal(code, 1);
+    assert.match(text, /client version: 0\.9\.0/);
+    assert.match(text, /no longer supported/);
+    assert.match(text, /GROKBOT_CLIENT_VERSION/);
+    assertNoSecrets(text, [password, token]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("doctor reports the local checks without printing secrets", async () => {
   const code = await withApp(async ({ deps, stdout }) => {
     const result = await main(["doctor"], deps);
     const text = stdout();
+    assert.match(text, /client version: \d+\.\d+\.\d+/);
     assert.match(text, /app data file: pass/);
     assert.match(text, /keychain item: pass/);
     assert.match(text, /token decrypts: pass/);

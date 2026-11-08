@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { clipDetail, rememberScoped } from "./redact.mjs";
+import { clientVersion } from "./version.mjs";
 import {
   classifyDelivery,
   decodeSendResponse,
@@ -9,7 +10,10 @@ import {
 const MESSAGE_MAX_BYTES = 16 * 1024;
 const RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
-const CLIENT_VERSION = "0.20.0";
+
+function headerVersion(version) {
+  return version || clientVersion();
+}
 
 let machineId;
 
@@ -118,26 +122,26 @@ function backendBase(env) {
   return readTestBase(env) ?? "https://api2.cursor.sh";
 }
 
-export function sandboxHeaders(accessToken, teamId) {
+export function sandboxHeaders(accessToken, teamId, version) {
   const headers = {
     "content-type": "application/json",
     "connect-protocol-version": "1",
     authorization: "Bearer " + accessToken,
     "x-cursor-client-type": "sand",
-    "x-cursor-client-version": CLIENT_VERSION,
+    "x-cursor-client-version": headerVersion(version),
     "x-sand-box-namespace": "prod",
   };
   if (teamId) headers["x-cursor-team-id"] = teamId;
   return headers;
 }
 
-export function sendHeaders(accessToken, teamId, requestId) {
+export function sendHeaders(accessToken, teamId, requestId, version) {
   const headers = {
     "content-type": "application/proto",
     "connect-protocol-version": "1",
     authorization: "Bearer " + accessToken,
     "x-cursor-client-type": "sand",
-    "x-cursor-client-version": CLIENT_VERSION,
+    "x-cursor-client-version": headerVersion(version),
     "x-sand-box-namespace": "prod",
     "x-request-id": requestId,
   };
@@ -211,13 +215,13 @@ function unknownDelivery(detail, secrets) {
   return error;
 }
 
-export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secrets, stdoutSecrets } = {}) {
+export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secrets, stdoutSecrets, version } = {}) {
   const url = backendBase(env).replace(/\/$/, "") + "/aiserver.v1.GrokBotService/EnsureSandBox";
   let response;
   try {
     response = await authedFetch(url, {
       method: "POST",
-      headers: sandboxHeaders(accessToken, teamId),
+      headers: sandboxHeaders(accessToken, teamId, version),
       body: "{}",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     }, env, fetchImpl);
@@ -251,7 +255,7 @@ export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secre
   };
 }
 
-export async function sendUserMessage(accessToken, fields, { teamId, env, fetchImpl, secrets } = {}) {
+export async function sendUserMessage(accessToken, fields, { teamId, env, fetchImpl, secrets, version } = {}) {
   const url = backendBase(env).replace(/\/$/, "") + "/aiserver.v1.GrokBotService/SendGrokBotUserMessage";
   const body = encodeSendRequest({ ...fields, language: fields.language || "en" });
   assertAllowedCredentialUrl(url, env);
@@ -260,7 +264,7 @@ export async function sendUserMessage(accessToken, fields, { teamId, env, fetchI
   try {
     response = await sendFetch(url, {
       method: "POST",
-      headers: sendHeaders(accessToken, teamId, randomUUID()),
+      headers: sendHeaders(accessToken, teamId, randomUUID(), version),
       body,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       redirect: "error",

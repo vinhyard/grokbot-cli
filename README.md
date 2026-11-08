@@ -12,7 +12,7 @@ Requests go only to HTTPS hosts on `cursor.sh` or `cursor.com`, and to the gatew
 
 ## Identity
 
-The tool sends the app's client-type and version headers because the backend needs them (`x-cursor-client-type`, `x-cursor-client-version`, and `x-sand-box-namespace`). It sends no source field and no ghost-mode or client-source header.
+The tool sends the app's client-type header and the installed Grok Bot version because the backend rejects unknown versions. The version comes from `GROKBOT_CLIENT_VERSION` when that is a valid version, otherwise from the installed app (`desktop-status.json`, then the app bundle), and otherwise falls back to 0.20.0. It sends no source field and no ghost-mode or client-source header.
 
 ## Commands
 
