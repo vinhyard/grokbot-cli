@@ -14,6 +14,16 @@ export function rememberSecrets(secrets, values) {
   }
 }
 
+export function rememberScoped(stdoutSecrets, stderrSecrets, value, stdout) {
+  if (typeof value !== "string" || value.length === 0) return;
+  if (stderrSecrets) stderrSecrets.add(value);
+  if (stdout && stdoutSecrets) stdoutSecrets.add(value);
+}
+
+export function clipDetail(value, secrets) {
+  return scrubText(value, secrets).slice(0, 300);
+}
+
 export function scrubText(value, secrets) {
   let text = String(value ?? "");
   const known = [...(secrets ?? [])].filter((secret) => typeof secret === "string" && secret.length > 0);

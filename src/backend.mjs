@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { redact, rememberSecrets } from "./redact.mjs";
+import { clipDetail, rememberScoped } from "./redact.mjs";
 import {
   classifyDelivery,
   decodeSendResponse,
@@ -200,12 +200,18 @@ export function assertVisibleHeader(value, label) {
   }
 }
 
-function safeDetail(error) {
+function safeDetail(error, secrets) {
   const message = error instanceof Error ? error.message : String(error);
-  return redact(message).slice(0, 300);
+  return clipDetail(message, secrets);
 }
 
-export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secrets } = {}) {
+function unknownDelivery(detail, secrets) {
+  const error = new Error("delivery is unknown and the message must not be resent: " + clipDetail(detail, secrets));
+  error.exitCode = 4;
+  return error;
+}
+
+export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secrets, stdoutSecrets } = {}) {
   const url = backendBase(env).replace(/\/$/, "") + "/aiserver.v1.GrokBotService/EnsureSandBox";
   let response;
   try {
@@ -216,12 +222,12 @@ export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secre
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     }, env, fetchImpl);
   } catch (error) {
-    throw new Error("EnsureSandBox failed: " + safeDetail(error));
+    throw new Error("EnsureSandBox failed: " + safeDetail(error, secrets));
   }
   const buffer = await readResponseBuffer(response);
   const text = buffer.toString("utf8");
   if (!response.ok) {
-    throw new Error("EnsureSandBox failed: " + response.status + " " + redact(text).slice(0, 300));
+    throw new Error("EnsureSandBox failed: " + response.status + " " + clipDetail(text, secrets));
   }
   let body;
   try {
@@ -236,7 +242,8 @@ export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secre
   assertVisibleHeader(token, "gateway token");
   const gatewayHeaders = routingHeaders(body);
   for (const value of Object.values(gatewayHeaders)) assertVisibleHeader(value, "routing header");
-  rememberSecrets(secrets, [token, ...Object.values(gatewayHeaders)]);
+  rememberScoped(stdoutSecrets, secrets, token, true);
+  for (const value of Object.values(gatewayHeaders)) rememberScoped(stdoutSecrets, secrets, value, value.length >= 16);
   return {
     gatewayUrl: assertAllowedCredentialUrl(String(gatewayUrl), env).replace(/\/$/, ""),
     gatewayToken: token,
@@ -244,33 +251,39 @@ export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secre
   };
 }
 
-export async function sendUserMessage(accessToken, fields, { teamId, env, fetchImpl } = {}) {
+export async function sendUserMessage(accessToken, fields, { teamId, env, fetchImpl, secrets } = {}) {
   const url = backendBase(env).replace(/\/$/, "") + "/aiserver.v1.GrokBotService/SendGrokBotUserMessage";
   const body = encodeSendRequest({ ...fields, language: fields.language || "en" });
+  assertAllowedCredentialUrl(url, env);
+  const sendFetch = fetchImpl ?? globalThis.fetch;
   let response;
   try {
-    response = await authedFetch(url, {
+    response = await sendFetch(url, {
       method: "POST",
       headers: sendHeaders(accessToken, teamId, randomUUID()),
       body,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    }, env, fetchImpl);
+      redirect: "error",
+    });
   } catch (error) {
-    throw new Error("send failed before a response; not retrying (" + safeDetail(error) + ")");
+    throw unknownDelivery(error instanceof Error ? error.message : String(error), secrets);
   }
-  const buffer = await readResponseBuffer(response);
+  let buffer;
+  try {
+    buffer = await readResponseBuffer(response);
+  } catch (error) {
+    throw unknownDelivery(error instanceof Error ? error.message : String(error), secrets);
+  }
   if (!response.ok) {
-    throw new Error("send failed: " + response.status + " " + redact(buffer.toString("utf8")).slice(0, 300) + "; not retrying");
+    throw unknownDelivery("HTTP " + response.status + " " + buffer.toString("utf8"), secrets);
   }
-  if (buffer.length === 0) throw new Error("send returned an empty response; not retrying");
-  if (buffer[0] === 0x7b) {
-    throw new Error("send failed: " + redact(buffer.toString("utf8")).slice(0, 300) + "; not retrying");
-  }
+  if (buffer.length === 0) throw unknownDelivery("empty response", secrets);
+  if (buffer[0] === 0x7b) throw unknownDelivery(buffer.toString("utf8"), secrets);
   try {
     const decoded = decodeSendResponse(buffer);
     return { decoded, result: classifyDelivery(decoded) };
   } catch {
-    throw new Error("send returned an unreadable response; not retrying");
+    throw unknownDelivery("unreadable response", secrets);
   }
 }
 

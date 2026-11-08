@@ -1,5 +1,5 @@
 import { authedFetch, readResponseBuffer } from "./backend.mjs";
-import { redact } from "./redact.mjs";
+import { clipDetail } from "./redact.mjs";
 
 export const POLL_INTERVAL_MS = 3000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -131,7 +131,7 @@ export function findNewReply(entries, beforeKeys, nonce, text) {
   return null;
 }
 
-async function gatewayCall(session, method, body, { env, fetchImpl, budget, read, signal }) {
+async function gatewayCall(session, method, body, { env, fetchImpl, budget, read, signal, secrets }) {
   if (read) budget?.charge();
   const url = String(session.gatewayUrl).replace(/\/$/, "") + "/api/" + method;
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -149,12 +149,12 @@ async function gatewayCall(session, method, body, { env, fetchImpl, budget, read
     }, env, fetchImpl);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(method + " failed: " + redact(message).slice(0, 300));
+    throw new Error(method + " failed: " + clipDetail(message, secrets));
   }
   const buffer = await readResponseBuffer(response);
   const text = buffer.toString("utf8");
   if (!response.ok) {
-    throw new Error(method + " failed: " + response.status + " " + redact(text).slice(0, 300));
+    throw new Error(method + " failed: " + response.status + " " + clipDetail(text, secrets));
   }
   if (!text) return {};
   try {

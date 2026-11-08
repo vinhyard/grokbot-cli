@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import {
   assertMessageSize,
+  assertVisibleHeader,
   ensureSandbox,
   getMachineId,
   sendUserMessage,
@@ -28,7 +29,7 @@ import {
   sleep,
   updateAgent,
 } from "../src/gateway.mjs";
-import { rememberSecrets, scrubText } from "../src/redact.mjs";
+import { rememberScoped, scrubText } from "../src/redact.mjs";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const MACOS_ONLY = "grokbot requires macOS; credential support is not available on this platform.";
@@ -56,7 +57,7 @@ Credentials are read from the macOS keychain at run time and kept in memory only
 The tool sends the app's client-type and version headers because the backend needs them.
 It sends no source field and no ghost-mode or client-source header.
 
-Exit codes: 0 success, 1 the message was not sent, 3 the message was sent and must not be resent.
+Exit codes: 0 success, 1 the message was not sent, 3 the message was sent and must not be resent, 4 delivery is unknown and the message must not be resent.
 `;
 
 function parseArgs(argv) {
@@ -133,14 +134,25 @@ function messageText(raw) {
 
 const INSTRUCTIONS_MAX_BYTES = 64 * 1024;
 
+function fileErrorCode(error) {
+  return error && typeof error === "object" && error.code ? error.code : "read failed";
+}
+
 function readInstructions(file) {
   if (!file) throw new Error("missing --instructions-file");
+  let info;
+  try {
+    info = statSync(file);
+  } catch (error) {
+    throw new Error("instructions file: " + fileErrorCode(error));
+  }
+  if (!info.isFile()) throw new Error("instructions file: not a regular file");
+  if (info.size > INSTRUCTIONS_MAX_BYTES) throw new Error("instructions file exceeds 64 KiB");
   let buffer;
   try {
     buffer = readFileSync(file);
   } catch (error) {
-    const code = error && typeof error === "object" && error.code ? error.code : "read failed";
-    throw new Error("instructions file: " + code);
+    throw new Error("instructions file: " + fileErrorCode(error));
   }
   if (buffer.length > INSTRUCTIONS_MAX_BYTES) throw new Error("instructions file exceeds 64 KiB");
   const text = buffer.toString("utf8");
@@ -173,22 +185,25 @@ async function openSession(deps) {
     platform,
     getKeychainPassword: () => {
       const password = (deps.getKeychainPassword ?? readKeychainPassword)();
-      rememberSecrets(deps.secrets, [password]);
+      rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, password, true);
       return password;
     },
   });
-  rememberSecrets(deps.secrets, [creds.accessToken, creds.teamId]);
+  assertVisibleHeader(creds.accessToken, "access token");
+  rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, creds.accessToken, true);
+  rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, creds.teamId, false);
   const route = await ensureSandbox(creds.accessToken, {
     teamId: creds.teamId,
     env,
     fetchImpl: deps.fetchImpl,
-    secrets: deps.secrets,
+    secrets: deps.stderrSecrets,
+    stdoutSecrets: deps.stdoutSecrets,
   });
-  return { creds, route, env, fetchImpl: deps.fetchImpl, budget: createReadBudget() };
+  return { creds, route, env, fetchImpl: deps.fetchImpl, budget: createReadBudget(), secrets: deps.stderrSecrets };
 }
 
 function callCtx(session) {
-  return { env: session.env, fetchImpl: session.fetchImpl, budget: session.budget };
+  return { env: session.env, fetchImpl: session.fetchImpl, budget: session.budget, secrets: session.secrets };
 }
 
 async function cmdBots(flags, deps, stdout) {
@@ -274,14 +289,18 @@ async function cmdSend(positionals, flags, deps, stdout) {
     sentAtMs: Date.now(),
     machineId: getMachineId(),
     language: "en",
-  }, { teamId: session.creds.teamId, env: session.env, fetchImpl: session.fetchImpl });
+  }, { teamId: session.creds.teamId, env: session.env, fetchImpl: session.fetchImpl, secrets: session.secrets });
   const result = sent.result;
   if (result.outcome === "duplicate") {
     stdout("duplicate, already accepted\n");
     return 0;
   }
   if (result.outcome === "refused") throw new Error("refused: " + result.message);
-  if (result.outcome !== "accepted") throw new Error("send failed: unexpected delivery result; not retrying");
+  if (result.outcome !== "accepted") {
+    const error = new Error("delivery is unknown and the message must not be resent");
+    error.exitCode = 4;
+    throw error;
+  }
   const label = result.delivery === 2 ? "accepted, queued" : "accepted";
   stdout(label + (result.messageId ? " message " + result.messageId : "") + "\n");
   let confirmEntries = [];
@@ -369,7 +388,7 @@ async function cmdDoctor(deps, stdout) {
   try {
     password = getPassword();
     if (typeof password !== "string" || password.length === 0) throw new Error("empty");
-    rememberSecrets(deps.secrets, [password]);
+    rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, password, true);
     mark("keychain item", true);
   } catch {
     mark("keychain item", false, "not readable");
@@ -378,7 +397,9 @@ async function cmdDoctor(deps, stdout) {
   if (fileOk && typeof password === "string" && password.length > 0) {
     try {
       creds = loadCredentials({ home, platform, getKeychainPassword: () => password });
-      rememberSecrets(deps.secrets, [creds.accessToken, creds.teamId]);
+      assertVisibleHeader(creds.accessToken, "access token");
+      rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, creds.accessToken, true);
+      rememberScoped(deps.stdoutSecrets, deps.stderrSecrets, creds.teamId, false);
       mark("token decrypts", true);
     } catch (error) {
       mark("token decrypts", false, error instanceof Error ? error.message : "failed");
@@ -390,7 +411,8 @@ async function cmdDoctor(deps, stdout) {
         teamId: creds.teamId,
         env,
         fetchImpl: deps.fetchImpl,
-        secrets: deps.secrets,
+        secrets: deps.stderrSecrets,
+        stdoutSecrets: deps.stdoutSecrets,
       });
       mark("EnsureSandBox", true);
     } catch (error) {
@@ -454,21 +476,30 @@ async function dispatch(argv, deps, stdout) {
   throw new Error("unknown command \"" + (command ?? "") + "\"");
 }
 
+function presentError(message, secrets) {
+  const scrubbed = scrubText(message, secrets).replace(/\s+/g, " ").trim();
+  return scrubbed.length > 300 ? scrubbed.slice(0, 300) : scrubbed;
+}
+
 export async function main(argv, deps = {}) {
-  const secrets = deps.secrets ?? new Set();
-  deps.secrets = secrets;
+  const stdoutSecrets = deps.stdoutSecrets ?? new Set();
+  const stderrSecrets = deps.stderrSecrets ?? deps.secrets ?? new Set();
+  deps.stdoutSecrets = stdoutSecrets;
+  deps.stderrSecrets = stderrSecrets;
+  deps.secrets = stderrSecrets;
   const writeOut = deps.stdout ?? ((chunk) => process.stdout.write(chunk));
   const writeErr = deps.stderr ?? ((chunk) => process.stderr.write(chunk));
-  const stdout = (chunk) => writeOut(scrubText(chunk, secrets));
-  const stderr = (chunk) => writeErr(scrubText(chunk, secrets));
+  const stdout = (chunk) => writeOut(scrubText(chunk, stdoutSecrets));
+  const stderr = (chunk) => writeErr(scrubText(chunk, stderrSecrets));
   const debug = deps.env?.GROKBOT_DEBUG === "1" || process.env.GROKBOT_DEBUG === "1";
   try {
     return await dispatch(argv, deps, stdout) ?? 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    stderr(scrubText(message, secrets).replace(/\s+/g, " ").trim() + "\n");
-    if (debug) stderr(scrubText(error instanceof Error ? error.stack || "" : "", secrets) + "\n");
-    return error.exitCode === 3 ? 3 : 1;
+    stderr(presentError(message, stderrSecrets) + "\n");
+    if (debug) stderr(scrubText(error instanceof Error ? error.stack || "" : "", stderrSecrets) + "\n");
+    if (error.exitCode === 3 || error.exitCode === 4) return error.exitCode;
+    return 1;
   }
 }
 

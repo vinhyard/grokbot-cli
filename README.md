@@ -27,7 +27,7 @@ grokbot doctor
 
 `send` refuses a target that is not one of the account's bots. The message is one argument, or `-` to read stdin, and must be at most 16 KiB. One trailing newline is removed from stdin. There is no bulk send and no retry after a send that may have been accepted. `--dry-run` prints the target and the text and does not call the send endpoint. `--wait` is at most 120 seconds and checks for a new bot reply every 3 seconds. Each of those checks stops when the remaining wait runs out.
 
-Exit codes are 0 when the command succeeds, 1 when nothing was sent, and 3 when the message was sent and must not be resent. A follow-up failure after an accepted send, including a wait timeout, a poll error, or the read budget, uses code 3.
+Exit codes are 0 when the command succeeds, and 1 only when the send request was never issued. Code 3 means the service accepted the message and it must not be resent; a wait timeout, a poll error, or the read budget uses 3. Code 4 means delivery is unknown and the message must not be resent: the request was issued, but the outcome was a timeout, a reset, an unreadable or oversized body, an HTTP error, or an unknown delivery code.
 
 `bot create` and `bot update` are experimental, untested against the live service. Both require `--yes`. They print the target and the instruction byte count first. The instructions file must be at most 64 KiB. Instructions are sent as the agent description through the same `createAgent` / `updateAgent` calls the gateway already uses. Try them only when you mean to change a bot.
 

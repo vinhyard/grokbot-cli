@@ -577,7 +577,7 @@ test("instructions file errors name the real failure and cap the size", async ()
   try {
     const missing = await main(["bot", "create", "--name", "NewBot", "--instructions-file", dir, "--yes"], deps);
     assert.equal(missing, 1);
-    assert.match(err.join(""), /instructions file: EISDIR/);
+    assert.match(err.join(""), /instructions file: not a regular file/);
     const big = join(dir, "big.txt");
     writeFileSync(big, Buffer.alloc(64 * 1024 + 1, 0x61));
     const capped = await main(["bot", "create", "--name", "NewBot", "--instructions-file", big, "--yes"], deps);
@@ -586,5 +586,96 @@ test("instructions file errors name the real failure and cap the size", async ()
     assert.equal(called, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a fetch rejection after the send is issued exits 4", async () => {
+  await withApp(async ({ deps, stderr }) => {
+    let issued = 0;
+    deps.fetchImpl = async (url, options) => {
+      if (String(url).includes("SendGrokBotUserMessage")) {
+        issued += 1;
+        throw new Error("socket hang up");
+      }
+      return fetch(url, options);
+    };
+    const code = await main(["send", "Alpha", "hello"], deps);
+    assert.equal(issued, 1);
+    assert.equal(code, 4);
+    assert.match(stderr(), /delivery is unknown and the message must not be resent/);
+    return code;
+  });
+});
+
+test("an HTTP error from send exits 4", async () => {
+  await withApp(async ({ deps, stderr }) => {
+    let issued = 0;
+    deps.fetchImpl = async (url, options) => {
+      if (String(url).includes("SendGrokBotUserMessage")) {
+        issued += 1;
+        return new Response("upstream down", { status: 500, headers: { "content-type": "text/plain" } });
+      }
+      return fetch(url, options);
+    };
+    const code = await main(["send", "Alpha", "hello"], deps);
+    assert.equal(issued, 1);
+    assert.equal(code, 4);
+    assert.match(stderr(), /delivery is unknown and the message must not be resent/);
+    assert.match(stderr(), /500/);
+    return code;
+  });
+});
+
+test("a short team id in bot text and json is left intact", async () => {
+  const team = "42";
+  const home = mkdtempSync(join(tmpdir(), "grokbot-team-"));
+  const err = [];
+  const out = [];
+  let origin = "";
+  const server = await startServer((record, res) => {
+    if (record.url.includes("EnsureSandBox")) {
+      sendJson(res, {
+        gatewayUrl: origin,
+        gatewayToken,
+        gatewayHeaders: { "x-anyrun-network-token": "us" },
+      });
+      return;
+    }
+    if (record.url.endsWith("/api/listAgents")) {
+      sendJson(res, { agents: [{ id: "bot-42", name: "Alpha", isGroup: false }] });
+      return;
+    }
+    if (record.url.endsWith("/api/getAgentTranscriptTail")) {
+      sendJson(res, { entries: [{ id: "e42", role: "assistant", text: "answer 42 just us" }] });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  origin = server.origin;
+  try {
+    writeAccount(home, { password, token, team });
+    const deps = {
+      platform: "darwin",
+      home,
+      env: { GROKBOT_TEST_BASE_URL: origin },
+      getKeychainPassword: () => password,
+      stdout: (chunk) => out.push(chunk),
+      stderr: (chunk) => err.push(chunk),
+    };
+    assert.equal(await main(["bots", "--json"], deps), 0);
+    const listed = JSON.parse(out.join(""));
+    assert.equal(listed[0].id, "bot-42");
+    out.length = 0;
+    assert.equal(await main(["thread", "bot-42", "--json"], deps), 0);
+    const payload = JSON.parse(out.join(""));
+    assert.equal(payload.entries[0].text, "answer 42 just us");
+    out.length = 0;
+    assert.equal(await main(["thread", "Alpha"], deps), 0);
+    assert.match(out.join(""), /answer 42 just us/);
+    assertNoSecrets(out.join("") + err.join(""), [password, token, gatewayToken]);
+  } finally {
+    await server.close();
+    rmSync(home, { recursive: true, force: true });
   }
 });
