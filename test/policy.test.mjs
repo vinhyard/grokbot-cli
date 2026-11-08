@@ -99,3 +99,67 @@ test("a gateway URL outside the test seam is refused before another fetch", asyn
     await server.close();
   }
 });
+
+test("oversized responses are rejected before they are buffered", async () => {
+  let reads = 0;
+  let cancelled = false;
+  const chunk = new Uint8Array(1024 * 1024);
+  let threw = false;
+  try {
+    await ensureSandbox("tok", {
+      env: { GROKBOT_TEST_BASE_URL: "http://127.0.0.1:9" },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body: {
+          getReader() {
+            return {
+              async read() {
+                reads += 1;
+                if (reads > 3) return { done: true, value: undefined };
+                return { done: false, value: chunk };
+              },
+              async cancel() {
+                cancelled = true;
+              },
+            };
+          },
+        },
+      }),
+    });
+  } catch (error) {
+    threw = true;
+    assert.match(error.message, /response too large/);
+  }
+  assert.equal(threw, true);
+  assert.equal(cancelled, true);
+  assert.ok(reads < 4);
+
+  let earlyCancel = false;
+  let threwEarly = false;
+  try {
+    await ensureSandbox("tok", {
+      env: { GROKBOT_TEST_BASE_URL: "http://127.0.0.1:9" },
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: (name) => name === "content-length" ? String(2 * 1024 * 1024 + 1) : null },
+        body: {
+          getReader() {
+            throw new Error("should not read");
+          },
+          async cancel() {
+            earlyCancel = true;
+          },
+        },
+      }),
+    });
+  } catch (error) {
+    threwEarly = true;
+    assert.match(error.message, /response too large/);
+    assert.equal(error.message.includes("should not read"), false);
+  }
+  assert.equal(threwEarly, true);
+  assert.equal(earlyCancel, true);
+});

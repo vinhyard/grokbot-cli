@@ -2,7 +2,6 @@ import { authedFetch, readResponseBuffer } from "./backend.mjs";
 import { redact } from "./redact.mjs";
 
 export const POLL_INTERVAL_MS = 3000;
-const RESPONSE_LIMIT = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 export function pollDelay(ms) {
@@ -11,6 +10,11 @@ export function pollDelay(ms) {
 
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, pollDelay(ms)));
+}
+
+export function pollAbortSignal(deadline, now = Date.now) {
+  const remaining = Math.max(1, Number(deadline) - Number(now()));
+  return AbortSignal.timeout(remaining);
 }
 
 export function createReadBudget(limit = 60) {
@@ -127,9 +131,10 @@ export function findNewReply(entries, beforeKeys, nonce, text) {
   return null;
 }
 
-async function gatewayCall(session, method, body, { env, fetchImpl, budget, read }) {
+async function gatewayCall(session, method, body, { env, fetchImpl, budget, read, signal }) {
   if (read) budget?.charge();
   const url = String(session.gatewayUrl).replace(/\/$/, "") + "/api/" + method;
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   let response;
   try {
     response = await authedFetch(url, {
@@ -140,14 +145,13 @@ async function gatewayCall(session, method, body, { env, fetchImpl, budget, read
         ...session.gatewayHeaders,
       },
       body: JSON.stringify(body ?? {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
     }, env, fetchImpl);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(method + " failed: " + redact(message).slice(0, 300));
   }
   const buffer = await readResponseBuffer(response);
-  if (buffer.length > RESPONSE_LIMIT) throw new Error(method + " response too large");
   const text = buffer.toString("utf8");
   if (!response.ok) {
     throw new Error(method + " failed: " + response.status + " " + redact(text).slice(0, 300));

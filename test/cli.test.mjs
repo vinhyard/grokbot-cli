@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { main } from "../bin/grokbot.mjs";
 import { decodeFields, encodeStringField, encodeVarintField } from "../src/proto.mjs";
 import { sendJson, startServer } from "./helpers/server.mjs";
@@ -53,19 +55,23 @@ async function withApp(run) {
     }
     if (record.url.endsWith("/api/getAgentTranscriptTail")) {
       state.tails += 1;
+      if (state.failPoll && state.tails >= 3) {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end("poll failed");
+        return;
+      }
       const old = { id: "old", role: "assistant", text: "earlier" };
       const own = { id: "u1", role: "user", text: state.lastText, clientNonce: state.lastNonce };
       sendJson(res, { entries: state.tails === 1 ? [old] : [old, own] });
       return;
     }
     if (record.url.endsWith("/api/getAgentThread")) {
-      sendJson(res, {
-        entries: [
-          { id: "old", role: "assistant", text: "earlier" },
-          { id: "u1", role: "user", text: state.lastText, clientNonce: state.lastNonce },
-          { id: "r1", role: "assistant", text: "pong" },
-        ],
-      });
+      const entries = [
+        { id: "old", role: "assistant", text: "earlier" },
+        { id: "u1", role: "user", text: state.lastText, clientNonce: state.lastNonce },
+      ];
+      if (!state.holdReply) entries.push({ id: "r1", role: "assistant", text: "pong" });
+      sendJson(res, { entries });
       return;
     }
     if (record.url.includes("SendGrokBotUserMessage")) {
@@ -297,7 +303,7 @@ test("create and update require --yes", async () => {
     assert.match(text, /experimental, untested against the live service/);
     assert.match(text, /target: NewBot/);
     assert.match(text, /target: Alpha/);
-    assert.match(text, /instructions: 10 characters/);
+    assert.match(text, /instructions: 10 bytes/);
     assert.match(err.join(""), /without --yes/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -362,4 +368,223 @@ test("send on a non-macOS platform fails before using credentials", async () => 
   assert.equal(called, false);
   assert.equal(code, 1);
   assert.match(err.join(""), /macOS/);
+});
+
+test("a test base without injected credentials is refused", async () => {
+  let called = false;
+  const err = [];
+  const code = await main(["bots"], {
+    platform: "darwin",
+    env: { GROKBOT_TEST_BASE_URL: "http://127.0.0.1:9" },
+    fetchImpl: () => {
+      called = true;
+    },
+    stdout: () => {},
+    stderr: (chunk) => err.push(chunk),
+  });
+  assert.equal(called, false);
+  assert.equal(code, 1);
+  assert.match(err.join(""), /test base URL requires injected credentials/);
+});
+
+test("GROKBOT_TEST_BASE_URL in process.env is not used with keychain credentials", async () => {
+  const previous = process.env.GROKBOT_TEST_BASE_URL;
+  process.env.GROKBOT_TEST_BASE_URL = "http://127.0.0.1:9";
+  const home = mkdtempSync(join(tmpdir(), "grokbot-seam-"));
+  const urls = [];
+  try {
+    writeAccount(home, { password, token });
+    const code = await main(["bots"], {
+      platform: "darwin",
+      home,
+      getKeychainPassword: () => password,
+      fetchImpl: async (url) => {
+        urls.push(String(url));
+        throw new Error("blocked");
+      },
+      stdout: () => {},
+      stderr: () => {},
+    });
+    assert.equal(code, 1);
+    assert.equal(urls.some((url) => url.includes("127.0.0.1")), false);
+    assert.equal(urls[0].startsWith("https://api2.cursor.sh/"), true);
+  } finally {
+    if (previous === undefined) delete process.env.GROKBOT_TEST_BASE_URL;
+    else process.env.GROKBOT_TEST_BASE_URL = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stdout and stderr scrub secrets the regex would miss", async () => {
+  const oddToken = "t:1!";
+  const oddPassword = "p!q";
+  const team = "8675309";
+  const oddGateway = "g:w%";
+  const routing = "h%1";
+  const home = mkdtempSync(join(tmpdir(), "grokbot-scrub-"));
+  const origin = "http://127.0.0.1:9";
+  const err = [];
+  try {
+    writeAccount(home, { password: oddPassword, token: oddToken, team });
+    const code = await main(["bots"], {
+      platform: "darwin",
+      home,
+      env: { GROKBOT_TEST_BASE_URL: origin },
+      getKeychainPassword: () => oddPassword,
+      fetchImpl: async (url) => {
+        if (String(url).includes("EnsureSandBox")) {
+          return Response.json({
+            gatewayUrl: origin,
+            gatewayToken: oddGateway,
+            gatewayHeaders: { "x-anyrun-network-token": routing },
+          });
+        }
+        throw new Error(
+          'Headers.append: "Bearer ' + oddGateway + '" is an invalid header value. '
+          + oddToken + " " + oddPassword + " " + team + " " + routing,
+        );
+      },
+      stdout: () => {},
+      stderr: (chunk) => err.push(chunk),
+    });
+    assert.equal(code, 1);
+    const text = err.join("");
+    assertNoSecrets(text, [oddToken, oddPassword, team, oddGateway, routing]);
+    assert.match(text, /\[redacted\]/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an unsafe gateway token is rejected without echoing it", async () => {
+  const broken = "bad\r\nvalue";
+  const home = mkdtempSync(join(tmpdir(), "grokbot-unsafe-"));
+  const origin = "http://127.0.0.1:9";
+  const err = [];
+  let continued = false;
+  try {
+    writeAccount(home, { password, token });
+    const code = await main(["bots"], {
+      platform: "darwin",
+      home,
+      env: { GROKBOT_TEST_BASE_URL: origin },
+      getKeychainPassword: () => password,
+      fetchImpl: async (url) => {
+        if (!String(url).includes("EnsureSandBox")) continued = true;
+        return Response.json({ gatewayUrl: origin, gatewayToken: broken });
+      },
+      stdout: () => {},
+      stderr: (chunk) => err.push(chunk),
+    });
+    assert.equal(code, 1);
+    assert.equal(continued, false);
+    assert.match(err.join(""), /rejected an unsafe gateway token/);
+    assertNoSecrets(err.join(""), [broken]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a follow-up failure after an accepted send exits 3", async () => {
+  await withApp(async ({ deps, state, requests, stdout, stderr }) => {
+    state.holdReply = true;
+    let clock = 0;
+    const signals = [];
+    deps.now = () => clock;
+    deps.sleep = async () => {
+      clock += 3000;
+    };
+    deps.fetchImpl = (url, options) => {
+      const target = String(url);
+      if (target.includes("getAgentThread") || (target.includes("getAgentTranscriptTail") && state.tails >= 2)) {
+        signals.push(options.signal);
+      }
+      return fetch(url, options);
+    };
+    const code = await main(["send", "Alpha", "hello", "--wait", "3"], deps);
+    assert.equal(code, 3);
+    assert.match(stdout(), /accepted message m-1/);
+    assert.match(stderr(), /message was sent and must not be resent/);
+    assert.equal(requests.filter((record) => record.url.includes("SendGrokBotUserMessage")).length, 1);
+    assert.ok(signals.length >= 1);
+    assert.equal(signals.every((signal) => signal && typeof signal.aborted === "boolean"), true);
+    return code;
+  });
+});
+
+test("a poll error after an accepted send exits 3", async () => {
+  await withApp(async ({ deps, state, stderr, requests }) => {
+    state.holdReply = true;
+    state.failPoll = true;
+    let clock = 0;
+    deps.now = () => clock;
+    deps.sleep = async () => {
+      clock += 3000;
+    };
+    const code = await main(["send", "Alpha", "hello", "--wait", "3"], deps);
+    assert.equal(code, 3);
+    assert.match(stderr(), /message was sent and must not be resent/);
+    assert.match(stderr(), /poll failed|getAgentTranscriptTail failed/);
+    assert.equal(requests.filter((record) => record.url.includes("SendGrokBotUserMessage")).length, 1);
+    return code;
+  });
+});
+
+test("help and version are ignored after the command", async () => {
+  const out = [];
+  const err = [];
+  const code = await main(["send", "Alpha", "--dry-run", "--", "-h"], {
+    platform: "linux",
+    env: {},
+    stdout: (chunk) => out.push(chunk),
+    stderr: (chunk) => err.push(chunk),
+  });
+  assert.equal(code, 0);
+  assert.match(out.join(""), /text:\n-h\n/);
+  assert.equal(out.join("").includes("Usage:"), false);
+  assert.equal(err.join(""), "");
+});
+
+test("stdin strips one trailing newline", async () => {
+  const bin = fileURLToPath(new URL("../bin/grokbot.mjs", import.meta.url));
+  const child = spawn(process.execPath, [bin, "send", "Alpha", "-", "--dry-run"], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const chunks = [];
+  child.stdout.on("data", (chunk) => chunks.push(chunk));
+  child.stderr.on("data", (chunk) => chunks.push(chunk));
+  child.stdin.end("hello\n");
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  const text = Buffer.concat(chunks).toString("utf8");
+  assert.equal(code, 0);
+  assert.match(text, /text:\nhello\n$/);
+  assert.equal(text.includes("hello\n\n"), false);
+});
+
+test("instructions file errors name the real failure and cap the size", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "grokbot-inst-"));
+  const err = [];
+  let called = false;
+  const deps = {
+    platform: "linux",
+    env: {},
+    fetchImpl: () => {
+      called = true;
+    },
+    stdout: () => {},
+    stderr: (chunk) => err.push(chunk),
+  };
+  try {
+    const missing = await main(["bot", "create", "--name", "NewBot", "--instructions-file", dir, "--yes"], deps);
+    assert.equal(missing, 1);
+    assert.match(err.join(""), /instructions file: EISDIR/);
+    const big = join(dir, "big.txt");
+    writeFileSync(big, Buffer.alloc(64 * 1024 + 1, 0x61));
+    const capped = await main(["bot", "create", "--name", "NewBot", "--instructions-file", big, "--yes"], deps);
+    assert.equal(capped, 1);
+    assert.match(err.join(""), /exceeds 64 KiB/);
+    assert.equal(called, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

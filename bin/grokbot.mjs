@@ -23,11 +23,12 @@ import {
   getAgentThread,
   getTranscriptTail,
   listAgents,
+  pollAbortSignal,
   resolveBot,
   sleep,
   updateAgent,
 } from "../src/gateway.mjs";
-import { redact } from "../src/redact.mjs";
+import { rememberSecrets, scrubText } from "../src/redact.mjs";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const MACOS_ONLY = "grokbot requires macOS; credential support is not available on this platform.";
@@ -47,11 +48,15 @@ Usage:
   grokbot --version
 
 bot create and bot update are ${EXPERIMENTAL}.
-They require --yes and print the target and instruction character count first.
+They require --yes and print the target and the instruction byte count first.
 Instructions are sent as the agent description through createAgent / updateAgent.
+An instructions file must be at most 64 KiB.
 
 Credentials are read from the macOS keychain at run time and kept in memory only.
-The send request leaves the source field unset and does not claim to be the desktop app.
+The tool sends the app's client-type and version headers because the backend needs them.
+It sends no source field and no ghost-mode or client-source header.
+
+Exit codes: 0 success, 1 the message was not sent, 3 the message was sent and must not be resent.
 `;
 
 function parseArgs(argv) {
@@ -116,21 +121,29 @@ function readStdin() {
     if (total > 16 * 1024) throw new Error("message exceeds 16 KiB");
     chunks.push(Buffer.from(buffer.subarray(0, count)));
   }
-  return Buffer.concat(chunks).toString("utf8");
+  let text = Buffer.concat(chunks).toString("utf8");
+  if (text.endsWith("\r\n")) text = text.slice(0, -2);
+  else if (text.endsWith("\n")) text = text.slice(0, -1);
+  return text;
 }
 
 function messageText(raw) {
   return assertMessageSize(raw === "-" ? readStdin() : raw);
 }
 
+const INSTRUCTIONS_MAX_BYTES = 64 * 1024;
+
 function readInstructions(file) {
   if (!file) throw new Error("missing --instructions-file");
-  let text;
+  let buffer;
   try {
-    text = readFileSync(file, "utf8");
-  } catch {
-    throw new Error("instructions file not found");
+    buffer = readFileSync(file);
+  } catch (error) {
+    const code = error && typeof error === "object" && error.code ? error.code : "read failed";
+    throw new Error("instructions file: " + code);
   }
+  if (buffer.length > INSTRUCTIONS_MAX_BYTES) throw new Error("instructions file exceeds 64 KiB");
+  const text = buffer.toString("utf8");
   if (text.trim() === "") throw new Error("instructions file is empty");
   return text;
 }
@@ -138,23 +151,38 @@ function readInstructions(file) {
 function beginMutation(stdout, target, instructions, yes) {
   stdout(EXPERIMENTAL + "\n");
   stdout("target: " + target + "\n");
-  stdout("instructions: " + instructions.length + " characters\n");
+  stdout("instructions: " + Buffer.byteLength(instructions) + " bytes\n");
   if (!yes) throw new Error("refusing to continue without --yes");
+}
+
+function credentialEnv(deps) {
+  const env = deps.env ?? {};
+  const seam = env.GROKBOT_TEST_BASE_URL;
+  if (seam != null && seam !== "" && deps.getKeychainPassword == null) {
+    throw new Error("test base URL requires injected credentials");
+  }
+  return env;
 }
 
 async function openSession(deps) {
   const platform = deps.platform ?? process.platform;
   if (platform !== "darwin") throw new Error(MACOS_ONLY);
-  const env = deps.env ?? process.env;
+  const env = credentialEnv(deps);
   const creds = loadCredentials({
     home: deps.home,
     platform,
-    getKeychainPassword: deps.getKeychainPassword,
+    getKeychainPassword: () => {
+      const password = (deps.getKeychainPassword ?? readKeychainPassword)();
+      rememberSecrets(deps.secrets, [password]);
+      return password;
+    },
   });
+  rememberSecrets(deps.secrets, [creds.accessToken, creds.teamId]);
   const route = await ensureSandbox(creds.accessToken, {
     teamId: creds.teamId,
     env,
     fetchImpl: deps.fetchImpl,
+    secrets: deps.secrets,
   });
   return { creds, route, env, fetchImpl: deps.fetchImpl, budget: createReadBudget() };
 }
@@ -190,20 +218,22 @@ async function cmdThread(positionals, flags, deps, stdout) {
 
 async function waitForReply({ session, bot, nonce, text, beforeKeys, confirmEntries, messageId, waitSec, deps, stdout }) {
   const ctx = callCtx(session);
+  const now = deps.now ?? Date.now;
+  const deadline = now() + waitSec * 1000;
+  const timed = () => ({ ...ctx, signal: pollAbortSignal(deadline, now) });
   let reply = findNewReply(confirmEntries, beforeKeys, nonce, text);
   if (!reply && messageId) {
     try {
-      const rooted = await getAgentThread(session.route, bot.id, messageId, ctx);
+      const rooted = await getAgentThread(session.route, bot.id, messageId, timed());
       reply = findNewReply(entriesOf(rooted), beforeKeys, nonce, text);
-    } catch {
-      // A rooted read is optional. Polling the transcript tail still runs.
+    } catch (error) {
+      if (error instanceof Error && /60 gateway reads/.test(error.message)) throw error;
     }
   }
-  const deadline = Date.now() + waitSec * 1000;
   const pause = deps.sleep ?? sleep;
-  while (!reply && Date.now() + POLL_INTERVAL_MS <= deadline) {
+  while (!reply && now() + POLL_INTERVAL_MS <= deadline) {
     await pause(POLL_INTERVAL_MS);
-    const page = await getTranscriptTail(session.route, bot.id, 40, ctx);
+    const page = await getTranscriptTail(session.route, bot.id, 40, timed());
     reply = findNewReply(entriesOf(page), beforeKeys, nonce, text);
   }
   if (!reply) throw new Error("no bot reply within " + waitSec + "s");
@@ -263,18 +293,25 @@ async function cmdSend(positionals, flags, deps, stdout) {
     stdout("receipt: transcript check failed\n");
   }
   if (waitSec) {
-    await waitForReply({
-      session,
-      bot,
-      nonce,
-      text,
-      beforeKeys,
-      confirmEntries,
-      messageId: result.messageId,
-      waitSec,
-      deps,
-      stdout,
-    });
+    try {
+      await waitForReply({
+        session,
+        bot,
+        nonce,
+        text,
+        beforeKeys,
+        confirmEntries,
+        messageId: result.messageId,
+        waitSec,
+        deps,
+        stdout,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "the follow-up failed";
+      const wrapped = new Error("message was sent and must not be resent: " + detail);
+      wrapped.exitCode = 3;
+      throw wrapped;
+    }
   }
   return 0;
 }
@@ -311,7 +348,7 @@ async function cmdUpdate(positionals, flags, deps, stdout) {
 async function cmdDoctor(deps, stdout) {
   const platform = deps.platform ?? process.platform;
   const home = deps.home ?? homedir();
-  const env = deps.env ?? process.env;
+  const env = credentialEnv(deps);
   let failed = false;
   const mark = (name, ok, reason) => {
     if (ok) {
@@ -319,7 +356,7 @@ async function cmdDoctor(deps, stdout) {
       return;
     }
     failed = true;
-    stdout(name + ": fail (" + redact(reason || "failed") + ")\n");
+    stdout(name + ": fail (" + (reason || "failed") + ")\n");
   };
   let fileOk = false;
   if (platform !== "darwin") mark("app data file", false, "macOS only");
@@ -332,6 +369,7 @@ async function cmdDoctor(deps, stdout) {
   try {
     password = getPassword();
     if (typeof password !== "string" || password.length === 0) throw new Error("empty");
+    rememberSecrets(deps.secrets, [password]);
     mark("keychain item", true);
   } catch {
     mark("keychain item", false, "not readable");
@@ -340,6 +378,7 @@ async function cmdDoctor(deps, stdout) {
   if (fileOk && typeof password === "string" && password.length > 0) {
     try {
       creds = loadCredentials({ home, platform, getKeychainPassword: () => password });
+      rememberSecrets(deps.secrets, [creds.accessToken, creds.teamId]);
       mark("token decrypts", true);
     } catch (error) {
       mark("token decrypts", false, error instanceof Error ? error.message : "failed");
@@ -347,7 +386,12 @@ async function cmdDoctor(deps, stdout) {
   } else mark("token decrypts", false, "not available");
   if (creds) {
     try {
-      await ensureSandbox(creds.accessToken, { teamId: creds.teamId, env, fetchImpl: deps.fetchImpl });
+      await ensureSandbox(creds.accessToken, {
+        teamId: creds.teamId,
+        env,
+        fetchImpl: deps.fetchImpl,
+        secrets: deps.secrets,
+      });
       mark("EnsureSandBox", true);
     } catch (error) {
       mark("EnsureSandBox", false, error instanceof Error ? error.message : "failed");
@@ -356,12 +400,34 @@ async function cmdDoctor(deps, stdout) {
   return failed ? 1 : 0;
 }
 
+function globalAction(argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--") return null;
+    if (arg === "--help" || arg === "-h") return "help";
+    if (arg === "--version" || arg === "-V") return "version";
+    if (arg === "--json" || arg === "--dry-run" || arg === "--yes") continue;
+    if (arg.startsWith("--")) {
+      const name = arg.slice(2).split("=")[0];
+      if (VALUE_FLAGS.has(name) && !arg.includes("=")) index += 1;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
 async function dispatch(argv, deps, stdout) {
-  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+  if (argv.length === 0) {
     stdout(HELP);
     return 0;
   }
-  if (argv.includes("--version") || argv.includes("-V")) {
+  const action = globalAction(argv);
+  if (action === "help") {
+    stdout(HELP);
+    return 0;
+  }
+  if (action === "version") {
     stdout(VERSION + "\n");
     return 0;
   }
@@ -389,16 +455,20 @@ async function dispatch(argv, deps, stdout) {
 }
 
 export async function main(argv, deps = {}) {
-  const stdout = deps.stdout ?? ((chunk) => process.stdout.write(chunk));
-  const stderr = deps.stderr ?? ((chunk) => process.stderr.write(chunk));
-  const debug = (deps.env ?? process.env).GROKBOT_DEBUG === "1";
+  const secrets = deps.secrets ?? new Set();
+  deps.secrets = secrets;
+  const writeOut = deps.stdout ?? ((chunk) => process.stdout.write(chunk));
+  const writeErr = deps.stderr ?? ((chunk) => process.stderr.write(chunk));
+  const stdout = (chunk) => writeOut(scrubText(chunk, secrets));
+  const stderr = (chunk) => writeErr(scrubText(chunk, secrets));
+  const debug = deps.env?.GROKBOT_DEBUG === "1" || process.env.GROKBOT_DEBUG === "1";
   try {
     return await dispatch(argv, deps, stdout) ?? 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    stderr(redact(message).replace(/\s+/g, " ").trim() + "\n");
-    if (debug) stderr(redact(error instanceof Error ? error.stack || "" : "") + "\n");
-    return 1;
+    stderr(scrubText(message, secrets).replace(/\s+/g, " ").trim() + "\n");
+    if (debug) stderr(scrubText(error instanceof Error ? error.stack || "" : "", secrets) + "\n");
+    return error.exitCode === 3 ? 3 : 1;
   }
 }
 

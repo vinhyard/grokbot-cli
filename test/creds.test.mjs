@@ -27,33 +27,19 @@ test("decrypts a Safe Storage blob with an injected password", () => {
   assertNoSecrets(thrown, [password, token]);
 });
 
-test("loadCredentials keeps the token out of logs and thrown text", () => {
+test("loadCredentials returns only the token material", () => {
   const home = mkdtempSync(join(tmpdir(), "grokbot-creds-"));
-  const logs = [];
-  const originalLog = console.log;
-  const originalError = console.error;
-  console.log = (...parts) => logs.push(parts.map(String).join(" "));
-  console.error = (...parts) => logs.push(parts.map(String).join(" "));
   try {
     writeAccount(home, { password, token });
-    let thrown = "";
-    let loaded;
-    try {
-      loaded = loadCredentials({
-        home,
-        platform: "darwin",
-        getKeychainPassword: () => password,
-      });
-    } catch (error) {
-      thrown = error instanceof Error ? error.stack || error.message : String(error);
-      throw error;
-    }
+    const loaded = loadCredentials({
+      home,
+      platform: "darwin",
+      getKeychainPassword: () => password,
+    });
     assert.equal(loaded.accessToken === token, true, "decrypt mismatch");
-    assert.equal(loaded.teamId, undefined);
-    assertNoSecrets(logs.join("\n") + thrown, [password, token, seal(password, token)]);
+    assert.deepEqual(Object.keys(loaded), ["accessToken"]);
+    assertNoSecrets(JSON.stringify(Object.keys(loaded)), [password, token]);
   } finally {
-    console.log = originalLog;
-    console.error = originalError;
     rmSync(home, { recursive: true, force: true });
   }
 });

@@ -5,6 +5,7 @@ import {
   decodeFields,
   decodeSendResponse,
   encodeSendRequest,
+  encodeStringField,
 } from "../src/proto.mjs";
 
 test("send request encodes the known bytes and omits the source field", () => {
@@ -41,4 +42,12 @@ test("decodes accepted, duplicate, and refused responses", () => {
   assert.equal(refused.delivery, 4);
   assert.equal(refused.refusal, "no");
   assert.deepEqual(classifyDelivery(refused), { outcome: "refused", message: "no" });
+
+  const plain = decodeSendResponse(Buffer.concat([
+    Buffer.from("2004", "hex"),
+    Buffer.from(encodeStringField(5, "nope")),
+  ]));
+  assert.equal(plain.delivery, 4);
+  assert.equal(plain.refusal, "nope");
+  assert.equal(classifyDelivery(plain).message, "nope");
 });

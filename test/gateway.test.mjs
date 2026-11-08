@@ -5,6 +5,7 @@ import {
   POLL_INTERVAL_MS,
   createReadBudget,
   findNewReply,
+  pollAbortSignal,
   pollDelay,
   resolveBot,
 } from "../src/gateway.mjs";
@@ -13,6 +14,15 @@ test("message limit is 16 KiB", () => {
   assert.equal(assertMessageSize("a".repeat(16 * 1024)), "a".repeat(16 * 1024));
   assert.throws(() => assertMessageSize("a".repeat(16 * 1024 + 1)), /16 KiB/);
   assert.throws(() => assertMessageSize("   "), /empty/);
+});
+
+test("a polling signal aborts when the remaining wait ends", async () => {
+  const signal = pollAbortSignal(Date.now() + 30, Date.now);
+  await new Promise((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+  assert.equal(signal.aborted, true);
 });
 
 test("gateway reads stop after 60 and polls wait at least 2 seconds", () => {

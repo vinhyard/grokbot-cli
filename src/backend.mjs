@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { redact } from "./redact.mjs";
+import { redact, rememberSecrets } from "./redact.mjs";
 import {
   classifyDelivery,
   decodeSendResponse,
@@ -24,8 +24,9 @@ export function assertMessageSize(text) {
   return text;
 }
 
-export function readTestBase(env = process.env) {
-  const raw = env?.GROKBOT_TEST_BASE_URL;
+export function readTestBase(env) {
+  if (env == null || typeof env !== "object") return null;
+  const raw = env.GROKBOT_TEST_BASE_URL;
   if (raw == null || raw === "") return null;
   let parsed;
   try {
@@ -56,7 +57,7 @@ function isCursorHost(hostname) {
   return host === "cursor.sh" || host === "cursor.com" || host.endsWith(".cursor.sh") || host.endsWith(".cursor.com");
 }
 
-export function assertAllowedCredentialUrl(rawUrl, env = process.env) {
+export function assertAllowedCredentialUrl(rawUrl, env) {
   const testBase = readTestBase(env);
   let parsed;
   try {
@@ -149,10 +150,54 @@ export async function authedFetch(url, options, env, fetchImpl = globalThis.fetc
   return fetchImpl(url, { ...options, redirect: "error" });
 }
 
+async function cancelBody(response) {
+  try {
+    if (response?.body && typeof response.body.cancel === "function") await response.body.cancel();
+  } catch {
+    // The body may already be closed.
+  }
+}
+
 export async function readResponseBuffer(response) {
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > RESPONSE_MAX_BYTES) throw new Error("response too large");
-  return buffer;
+  const declared = response.headers?.get?.("content-length");
+  if (declared != null && declared !== "") {
+    const size = Number(declared);
+    if (!Number.isFinite(size) || size > RESPONSE_MAX_BYTES) {
+      await cancelBody(response);
+      throw new Error("response too large");
+    }
+  }
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > RESPONSE_MAX_BYTES) throw new Error("response too large");
+    return buffer;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = value?.byteLength ?? value?.length ?? 0;
+      total += bytes;
+      if (total > RESPONSE_MAX_BYTES) throw new Error("response too large");
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // The reader may already be closed.
+    }
+  }
+  return Buffer.concat(chunks, total);
+}
+
+export function assertVisibleHeader(value, label) {
+  if (typeof value !== "string" || !/^[\x21-\x7e]+$/.test(value)) {
+    throw new Error("rejected an unsafe " + label);
+  }
 }
 
 function safeDetail(error) {
@@ -160,7 +205,7 @@ function safeDetail(error) {
   return redact(message).slice(0, 300);
 }
 
-export async function ensureSandbox(accessToken, { teamId, env = process.env, fetchImpl } = {}) {
+export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secrets } = {}) {
   const url = backendBase(env).replace(/\/$/, "") + "/aiserver.v1.GrokBotService/EnsureSandBox";
   let response;
   try {
@@ -187,14 +232,19 @@ export async function ensureSandbox(accessToken, { teamId, env = process.env, fe
   const gatewayUrl = body.gatewayUrl || body.gateway_url;
   const gatewayToken = body.gatewayToken || body.gateway_token;
   if (!gatewayUrl || !gatewayToken) throw new Error("EnsureSandBox returned no gateway route");
+  const token = String(gatewayToken);
+  assertVisibleHeader(token, "gateway token");
+  const gatewayHeaders = routingHeaders(body);
+  for (const value of Object.values(gatewayHeaders)) assertVisibleHeader(value, "routing header");
+  rememberSecrets(secrets, [token, ...Object.values(gatewayHeaders)]);
   return {
     gatewayUrl: assertAllowedCredentialUrl(String(gatewayUrl), env).replace(/\/$/, ""),
-    gatewayToken: String(gatewayToken),
-    gatewayHeaders: routingHeaders(body),
+    gatewayToken: token,
+    gatewayHeaders,
   };
 }
 
-export async function sendUserMessage(accessToken, fields, { teamId, env = process.env, fetchImpl } = {}) {
+export async function sendUserMessage(accessToken, fields, { teamId, env, fetchImpl } = {}) {
   const url = backendBase(env).replace(/\/$/, "") + "/aiserver.v1.GrokBotService/SendGrokBotUserMessage";
   const body = encodeSendRequest({ ...fields, language: fields.language || "en" });
   let response;

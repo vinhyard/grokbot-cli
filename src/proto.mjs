@@ -114,9 +114,15 @@ export function decodeSendResponse(buffer) {
     else if (field.field === 3 && field.wire === 2) decoded.messageId = textOf(field.value);
     else if (field.field === 4 && field.wire === 0) decoded.delivery = Number(field.value);
     else if (field.field === 5 && field.wire === 2) {
-      const nested = decodeFields(field.value);
-      const message = nested.find((item) => item.field === 2 && item.wire === 2);
-      if (message) decoded.refusal = textOf(message.value);
+      let refusal = "";
+      try {
+        const nested = decodeFields(field.value);
+        const message = nested.find((item) => item.field === 2 && item.wire === 2);
+        if (message) refusal = textOf(message.value);
+      } catch {
+        refusal = "";
+      }
+      decoded.refusal = refusal || textOf(field.value);
     }
   }
   return decoded;

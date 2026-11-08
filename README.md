@@ -12,7 +12,7 @@ Requests go only to HTTPS hosts on `cursor.sh` or `cursor.com`, and to the gatew
 
 ## Identity
 
-The tool does not claim to be the desktop app. The send body leaves the source field unset, and it does not send a desktop-client or privacy-mode header.
+The tool sends the app's client-type and version headers because the backend needs them (`x-cursor-client-type`, `x-cursor-client-version`, and `x-sand-box-namespace`). It sends no source field and no ghost-mode or client-source header.
 
 ## Commands
 
@@ -25,9 +25,11 @@ grokbot bot update <bot id|name> --instructions-file <file> [--name <name>] --ye
 grokbot doctor
 ```
 
-`send` refuses a target that is not one of the account's bots. The message is one argument, or `-` to read stdin, and must be at most 16 KiB. There is no bulk send and no retry after a send that may have been accepted. `--dry-run` prints the target and the text and does not call the send endpoint. `--wait` is at most 120 seconds and checks for a new bot reply every 3 seconds.
+`send` refuses a target that is not one of the account's bots. The message is one argument, or `-` to read stdin, and must be at most 16 KiB. One trailing newline is removed from stdin. There is no bulk send and no retry after a send that may have been accepted. `--dry-run` prints the target and the text and does not call the send endpoint. `--wait` is at most 120 seconds and checks for a new bot reply every 3 seconds. Each of those checks stops when the remaining wait runs out.
 
-`bot create` and `bot update` are experimental, untested against the live service. Both require `--yes`. They print the target and the instruction character count first. Instructions are sent as the agent description through the same `createAgent` / `updateAgent` calls the gateway already uses. Try them only when you mean to change a bot.
+Exit codes are 0 when the command succeeds, 1 when nothing was sent, and 3 when the message was sent and must not be resent. A follow-up failure after an accepted send, including a wait timeout, a poll error, or the read budget, uses code 3.
+
+`bot create` and `bot update` are experimental, untested against the live service. Both require `--yes`. They print the target and the instruction byte count first. The instructions file must be at most 64 KiB. Instructions are sent as the agent description through the same `createAgent` / `updateAgent` calls the gateway already uses. Try them only when you mean to change a bot.
 
 `doctor` reports pass or fail for the account file, the keychain item, decryption, and the sandbox route. It does not print secrets.
 
