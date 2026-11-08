@@ -114,6 +114,7 @@ async function withApp(run) {
     home,
     env: { GROKBOT_TEST_BASE_URL: origin },
     getKeychainPassword: () => password,
+    clientVersion: "0.0.0-test",
     stdout: (chunk) => out.push(chunk),
     stderr: (chunk) => err.push(chunk),
     sleep: async () => {
@@ -226,7 +227,7 @@ test("send accepts a listed bot without claiming a desktop identity", async () =
         assert.equal(name in record.headers, false);
       }
       assert.equal(record.headers["x-cursor-client-type"], "sand");
-      assert.equal(record.headers["x-cursor-client-version"], "0.20.0");
+      assert.equal(record.headers["x-cursor-client-version"], "0.0.0-test");
       assert.equal(record.headers["x-sand-box-namespace"], "prod");
     }
     if (send.headers.authorization !== "Bearer " + token) throw new Error("authorization header mismatch");
@@ -338,6 +339,7 @@ test("create and update with --yes use the gateway shapes", async () => {
 
 test("backend requests send the version read from the app status file", async () => {
   await withApp(async ({ deps, requests }) => {
+    deps.clientVersion = undefined;
     const status = join(deps.home, "Library", "Application Support", "Grok Bot", "desktop-status.json");
     const files = new Map([[status, JSON.stringify({ appVersion: "4.5.6" })]]);
     let plistReads = 0;

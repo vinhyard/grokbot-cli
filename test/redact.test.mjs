@@ -38,7 +38,7 @@ test("EnsureSandBox error text does not include the token", async () => {
   try {
     let threw = false;
     try {
-      await ensureSandbox(token, { env: { GROKBOT_TEST_BASE_URL: server.origin } });
+      await ensureSandbox(token, { env: { GROKBOT_TEST_BASE_URL: server.origin }, version: "0.0.0-test" });
     } catch (error) {
       threw = true;
       if (String(error.message).includes(token)) throw new Error("error text leaked a credential");

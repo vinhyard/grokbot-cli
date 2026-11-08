@@ -146,7 +146,7 @@ async function gatewayCall(session, method, body, { env, fetchImpl, budget, read
       },
       body: JSON.stringify(body ?? {}),
       signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
-    }, env, fetchImpl);
+    }, env, fetchImpl, "gateway");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(method + " failed: " + clipDetail(message, secrets));

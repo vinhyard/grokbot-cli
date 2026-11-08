@@ -8,7 +8,7 @@ Send uses an undocumented backend call (`SendGrokBotUserMessage`). The vendor ca
 
 The only credential source is the macOS keychain item `Grok Bot Safe Storage`, read at run time. The account file under Application Support supplies the encrypted blob; the tool decrypts it in memory. Tokens are not written to files, logs, or command output. There is no token flag, no token environment variable, and no prompt. Other operating systems are refused.
 
-Requests go only to HTTPS hosts on `cursor.sh` or `cursor.com`, and to the gateway URL that the account's own backend returns when that URL is also an HTTPS host on those domains. Authenticated requests do not follow redirects.
+Backend requests go only to HTTPS hosts on `cursor.sh` or `cursor.com`. The gateway URL the backend returns may also be an HTTPS host on `cursorvm.com`. Authenticated requests do not follow redirects.
 
 ## Identity
 

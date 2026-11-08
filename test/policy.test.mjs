@@ -3,6 +3,35 @@ import { test } from "node:test";
 import { assertAllowedCredentialUrl, ensureSandbox, readTestBase, routingHeaders } from "../src/backend.mjs";
 import { sendJson, startServer } from "./helpers/server.mjs";
 
+test("gateway hosts may be cursorvm.com and backends may not", () => {
+  const env = {};
+  assert.equal(
+    assertAllowedCredentialUrl("https://abc.cursorvm.com/box", env, "gateway").startsWith("https://abc.cursorvm.com"),
+    true,
+  );
+  const longHost = "a".repeat(40) + ".example.com";
+  for (const raw of [
+    "https://cursorvm.com.evil.com/gw",
+    "https://notcursorvm.com/gw",
+    "https://evilcursorvm.com/gw",
+    "https://" + longHost + "/secret/path?q=1",
+  ]) {
+    assert.throws(() => assertAllowedCredentialUrl(raw, env, "gateway"), (error) => {
+      assert.match(error.message, /Rejected credential URL host/);
+      assert.equal(error.message.includes("/"), false);
+      assert.equal(error.message.includes("?"), false);
+      assert.equal(error.message.includes("secret"), false);
+      assert.equal(error.message.includes("a".repeat(40)), false);
+      return true;
+    });
+  }
+  assert.throws(() => assertAllowedCredentialUrl("https://abc.cursorvm.com.evil.com/gw", env, "gateway"), /host "evil\.com"/);
+  assert.throws(() => assertAllowedCredentialUrl("http://abc.cursorvm.com/gw", env, "gateway"), /only https/);
+  assert.throws(() => assertAllowedCredentialUrl("https://user:pw@abc.cursorvm.com/gw", env, "gateway"), /userinfo/);
+  assert.throws(() => assertAllowedCredentialUrl("https://abc.cursorvm.com/box", env, "backend"), /cursorvm\.com/);
+  assert.throws(() => assertAllowedCredentialUrl("https://cursorvm.com/box", env, "backend"), /Rejected credential URL host/);
+});
+
 test("host policy rejects non-cursor hosts, http, and userinfo", () => {
   const env = {};
   assert.equal(assertAllowedCredentialUrl("https://api2.cursor.sh/aiserver.v1.GrokBotService/EnsureSandBox", env).startsWith("https://api2.cursor.sh"), true);
@@ -63,7 +92,7 @@ test("redirects are not followed", async () => {
   try {
     let threw = false;
     try {
-      await ensureSandbox(token, { env: { GROKBOT_TEST_BASE_URL: origin } });
+      await ensureSandbox(token, { env: { GROKBOT_TEST_BASE_URL: origin }, version: "0.0.0-test" });
     } catch (error) {
       threw = true;
       if (String(error.message).includes(token)) throw new Error("error text leaked a credential");
@@ -87,7 +116,7 @@ test("a gateway URL outside the test seam is refused before another fetch", asyn
   try {
     let threw = false;
     try {
-      await ensureSandbox(token, { env: { GROKBOT_TEST_BASE_URL: server.origin } });
+      await ensureSandbox(token, { env: { GROKBOT_TEST_BASE_URL: server.origin }, version: "0.0.0-test" });
     } catch (error) {
       threw = true;
       if (String(error.message).includes(token)) throw new Error("error text leaked a credential");
@@ -107,6 +136,7 @@ test("oversized responses are rejected before they are buffered", async () => {
   let threw = false;
   try {
     await ensureSandbox("tok", {
+      version: "0.0.0-test",
       env: { GROKBOT_TEST_BASE_URL: "http://127.0.0.1:9" },
       fetchImpl: async () => ({
         ok: true,
@@ -140,6 +170,7 @@ test("oversized responses are rejected before they are buffered", async () => {
   let threwEarly = false;
   try {
     await ensureSandbox("tok", {
+      version: "0.0.0-test",
       env: { GROKBOT_TEST_BASE_URL: "http://127.0.0.1:9" },
       fetchImpl: async () => ({
         ok: true,

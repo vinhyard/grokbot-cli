@@ -55,6 +55,7 @@ Instructions are sent as the agent description through createAgent / updateAgent
 An instructions file must be at most 64 KiB.
 
 Credentials are read from the macOS keychain at run time and kept in memory only.
+Backend requests go only to HTTPS hosts on cursor.sh or cursor.com. Gateway requests may also use HTTPS hosts on cursorvm.com.
 The tool sends the app's client-type header and the installed app's version because the backend rejects unknown versions.
 When no app version is found, the version falls back to 0.20.0. GROKBOT_CLIENT_VERSION overrides it.
 It sends no source field and no ghost-mode or client-source header.

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { clipDetail, rememberScoped } from "./redact.mjs";
-import { clientVersion } from "./version.mjs";
+import { FALLBACK_CLIENT_VERSION } from "./version.mjs";
 import {
   classifyDelivery,
   decodeSendResponse,
@@ -12,7 +12,7 @@ const RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 function headerVersion(version) {
-  return version || clientVersion();
+  return version || FALLBACK_CLIENT_VERSION;
 }
 
 let machineId;
@@ -56,12 +56,26 @@ export function readTestBase(env) {
   return parsed.origin;
 }
 
+function normalizedHost(hostname) {
+  return String(hostname || "").toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
+}
+
 function isCursorHost(hostname) {
-  const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
+  const host = normalizedHost(hostname);
   return host === "cursor.sh" || host === "cursor.com" || host.endsWith(".cursor.sh") || host.endsWith(".cursor.com");
 }
 
-export function assertAllowedCredentialUrl(rawUrl, env) {
+function isCursorVmHost(hostname) {
+  return normalizedHost(hostname).endsWith(".cursorvm.com");
+}
+
+function publicHost(hostname) {
+  const labels = normalizedHost(hostname).split(".").filter(Boolean);
+  if (labels.length >= 2) return labels.slice(-2).join(".");
+  return labels[0] || "unknown";
+}
+
+export function assertAllowedCredentialUrl(rawUrl, env, kind = "backend") {
   const testBase = readTestBase(env);
   let parsed;
   try {
@@ -75,7 +89,7 @@ export function assertAllowedCredentialUrl(rawUrl, env) {
   if (testBase) {
     if (parsed.origin !== testBase) {
       throw new Error(
-        'Rejected credential URL host "' + parsed.hostname + '": test mode only allows the loopback GROKBOT_TEST_BASE_URL.',
+        'Rejected credential URL host "' + publicHost(parsed.hostname) + '": test mode only allows the loopback GROKBOT_TEST_BASE_URL.',
       );
     }
     return String(rawUrl).replace(/\/$/, "");
@@ -83,10 +97,12 @@ export function assertAllowedCredentialUrl(rawUrl, env) {
   if (parsed.protocol !== "https:") {
     throw new Error("Rejected credential URL: only https is allowed (got " + parsed.protocol + ").");
   }
-  if (!isCursorHost(parsed.hostname)) {
-    throw new Error(
-      'Rejected credential URL host "' + parsed.hostname + '". Credentials may only be sent to https hosts on cursor.sh or cursor.com.',
-    );
+  const allowed = kind === "gateway" ? isCursorHost(parsed.hostname) || isCursorVmHost(parsed.hostname) : isCursorHost(parsed.hostname);
+  if (!allowed) {
+    const where = kind === "gateway"
+      ? "Gateways must be https on cursor.sh, cursor.com, or cursorvm.com."
+      : "Backends must be https on cursor.sh or cursor.com.";
+    throw new Error('Rejected credential URL host "' + publicHost(parsed.hostname) + '". ' + where);
   }
   return String(rawUrl).replace(/\/$/, "");
 }
@@ -149,8 +165,8 @@ export function sendHeaders(accessToken, teamId, requestId, version) {
   return headers;
 }
 
-export async function authedFetch(url, options, env, fetchImpl = globalThis.fetch) {
-  assertAllowedCredentialUrl(url, env);
+export async function authedFetch(url, options, env, fetchImpl = globalThis.fetch, kind = "backend") {
+  assertAllowedCredentialUrl(url, env, kind);
   return fetchImpl(url, { ...options, redirect: "error" });
 }
 
@@ -249,7 +265,7 @@ export async function ensureSandbox(accessToken, { teamId, env, fetchImpl, secre
   rememberScoped(stdoutSecrets, secrets, token, true);
   for (const value of Object.values(gatewayHeaders)) rememberScoped(stdoutSecrets, secrets, value, value.length >= 16);
   return {
-    gatewayUrl: assertAllowedCredentialUrl(String(gatewayUrl), env).replace(/\/$/, ""),
+    gatewayUrl: assertAllowedCredentialUrl(String(gatewayUrl), env, "gateway").replace(/\/$/, ""),
     gatewayToken: token,
     gatewayHeaders,
   };
