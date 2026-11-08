@@ -17,10 +17,18 @@ test("message limit is 16 KiB", () => {
 });
 
 test("a polling signal aborts when the remaining wait ends", async () => {
-  const signal = pollAbortSignal(Date.now() + 30, Date.now);
+  const signal = pollAbortSignal(Date.now() + 20, Date.now);
   await new Promise((resolve) => {
-    if (signal.aborted) resolve();
-    else signal.addEventListener("abort", () => resolve(), { once: true });
+    const timer = setTimeout(resolve, 200);
+    if (signal.aborted) {
+      clearTimeout(timer);
+      resolve();
+      return;
+    }
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
   });
   assert.equal(signal.aborted, true);
 });

@@ -15,9 +15,9 @@ export function rememberSecrets(secrets, values) {
 }
 
 export function scrubText(value, secrets) {
-  let text = redact(value);
+  let text = String(value ?? "");
   const known = [...(secrets ?? [])].filter((secret) => typeof secret === "string" && secret.length > 0);
   known.sort((left, right) => right.length - left.length);
   for (const secret of known) text = text.split(secret).join("[redacted]");
-  return text;
+  return redact(text);
 }

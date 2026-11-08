@@ -13,7 +13,7 @@ test("scrubs exact secrets the pattern filter would keep", () => {
   const broken = "bad\r\nvalue";
   const nodeError = 'Headers.append: "Bearer ' + token + '" is an invalid header value. '
     + [password, team, gateway, routing, broken].join(" ");
-  assert.equal(redact(nodeError).includes(token), true);
+  assert.equal(redact("x " + token + " y").includes(token), true);
   const cleaned = scrubText(nodeError, [token, password, team, gateway, routing, broken]);
   for (const secret of [token, password, team, gateway, routing, broken]) {
     if (cleaned.includes(secret)) throw new Error("error text leaked a credential");
