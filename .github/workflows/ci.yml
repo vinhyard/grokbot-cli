@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: syntax
+        run: |
+          node --check bin/grokbot.mjs
+          node --check src/redact.mjs
+          node --check src/proto.mjs
+          node --check src/creds.mjs
+          node --check src/backend.mjs
+          node --check src/gateway.mjs
+          node --check test/proto.test.mjs
+          node --check test/policy.test.mjs
+          node --check test/redact.test.mjs
+          node --check test/creds.test.mjs
+          node --check test/gateway.test.mjs
+          node --check test/cli.test.mjs
+          node --check test/honesty.test.mjs
+          node --check test/helpers/server.mjs
+          node --check test/helpers/secrets.mjs
+      - name: test
+        run: node --test

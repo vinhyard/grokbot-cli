@@ -1,0 +1,16 @@
+{
+  "name": "grokbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private terminal tool for the captain's Grok Bot app bots.",
+  "bin": {
+    "grokbot": "./bin/grokbot.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
