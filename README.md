@@ -39,6 +39,8 @@ grokbot thread alpha
 grokbot send alpha "hello"
 ```
 
+Replace alpha with a bot name or id from `grokbot bots`.
+
 ## Commands
 
 ```text
@@ -51,6 +53,7 @@ grokbot doctor
 ```
 
 Run `grokbot --help` for the same summary.
+Replace alpha with a bot name or id from `grokbot bots`.
 
 ### bots
 
@@ -132,11 +135,13 @@ Try them only when you mean to change a bot.
 | Code | Meaning |
 | --- | --- |
 | 0 | Ok. The command succeeded. |
-| 1 | Not sent. The send request was never issued. |
+| 1 | Error. Nothing was delivered: the send request was never issued, or the service refused it. Also used for any other command failure, including failed doctor checks. |
 | 3 | Sent, but the wait failed. The service accepted the message. A wait timeout, a poll error, or the read budget uses 3. Do not resend. |
 | 4 | Delivery unknown. The request was issued, but the outcome was a timeout, a reset, an unreadable or oversized body, an HTTP error, or an unknown delivery code. Do not resend. |
 
-Exit codes are 0 when the command succeeds, and 1 only when the send request was never issued.
+Exit codes are 0 when the command succeeds.
+Code 1 is an error and nothing was delivered: the send request was never issued, or the service refused it.
+Code 1 is also used for any other command failure, including failed doctor checks.
 Code 3 means the service accepted the message and it must not be resent; a wait timeout, a poll error, or the read budget uses 3.
 Code 4 means delivery is unknown and the message must not be resent: the request was issued, but the outcome was a timeout, a reset, an unreadable or oversized body, an HTTP error, or an unknown delivery code.
 
