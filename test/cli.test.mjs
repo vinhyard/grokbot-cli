@@ -144,7 +144,7 @@ test("help and version", async () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const help = [];
   assert.equal(await main(["--help"], { stdout: (chunk) => help.push(chunk), stderr: () => {} }), 0);
-  assert.match(help.join(""), /experimental, untested against the live service/);
+  assert.match(help.join(""), /bot create and bot update are experimental\./);
   const version = [];
   assert.equal(await main(["--version"], { stdout: (chunk) => version.push(chunk), stderr: () => {} }), 0);
   assert.equal(version.join(""), pkg.version + "\n");
@@ -301,7 +301,7 @@ test("create and update require --yes", async () => {
     assert.equal(created, 1);
     assert.equal(updated, 1);
     const text = out.join("");
-    assert.match(text, /experimental, untested against the live service/);
+    assert.match(text, /^experimental$/m);
     assert.match(text, /target: NewBot/);
     assert.match(text, /target: Alpha/);
     assert.match(text, /instructions: 10 bytes/);

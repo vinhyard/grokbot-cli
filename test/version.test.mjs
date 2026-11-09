@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { FALLBACK_CLIENT_VERSION, resolveClientVersion, validAppVersion } from "../src/version.mjs";
 
+const home = "/home/user";
+
 function fixture(files, plists = {}) {
   return {
-    home: "/home/captain",
+    home,
     platform: "darwin",
     env: {},
     exists: (path) => files.has(path) || Object.hasOwn(plists, path),
@@ -20,8 +22,8 @@ function fixture(files, plists = {}) {
   };
 }
 
-const statusPath = join("/home/captain", "Library", "Application Support", "Grok Bot", "desktop-status.json");
-const homePlist = join("/home/captain", "Applications", "Grok Bot.app/Contents/Info.plist");
+const statusPath = join(home, "Library", "Application Support", "Grok Bot", "desktop-status.json");
+const homePlist = join(home, "Applications", "Grok Bot.app/Contents/Info.plist");
 const systemPlist = join("/Applications", "Grok Bot.app/Contents/Info.plist");
 
 test("version pattern accepts app versions and rejects anything else", () => {
@@ -70,7 +72,7 @@ test("GROKBOT_CLIENT_VERSION overrides files and an invalid override is ignored"
 test("non-darwin does not read the Mac app paths", () => {
   let looked = false;
   const version = resolveClientVersion({
-    home: "/home/captain",
+    home,
     platform: "linux",
     env: {},
     exists: () => {

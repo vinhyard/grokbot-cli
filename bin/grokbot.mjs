@@ -34,10 +34,10 @@ import { clientVersion } from "../src/version.mjs";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const MACOS_ONLY = "grokbot requires macOS; credential support is not available on this platform.";
-const EXPERIMENTAL = "experimental, untested against the live service";
+const EXPERIMENTAL = "experimental";
 const VALUE_FLAGS = new Set(["limit", "wait", "name", "instructions-file"]);
 
-const HELP = `grokbot — private terminal tool for Grok Bot app bots
+const HELP = `grokbot — unofficial command-line tool for the bots in the Grok Bot desktop app
 
 Usage:
   grokbot bots [--json]
