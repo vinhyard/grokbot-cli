@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Private terminal tool for the captain's Grok Bot app bots.",
+  "description": "Unofficial command-line tool for the bots in the Grok Bot desktop app.",
+  "license": "MIT",
   "bin": {
     "grokbot": "./bin/grokbot.mjs"
   },
